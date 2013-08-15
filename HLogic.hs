@@ -1,24 +1,6 @@
 {-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, OverlappingInstances #-}
 
-module HLogic(
-    eq,
-    notEq,
-    (===),
-    (=/=),
-    run,
-    Term(..),
-    success,
-    fail,
-    fresh,
-    conso,
-    membero,
-    heado,
-    tailo,
-    emptyo,
-    appendo,
-    anyo,
-    toTerm
-) where
+module HLogic where
 
 import Prelude hiding (fail)
 import qualified Data.Map as Map
@@ -30,7 +12,7 @@ data LVar = LVar Int deriving (Show, Eq, Ord)
 
 data Term = TInt Int
           | TString String
-          | TVar Int 
+          | TVar Int
           | TNil
           | TCons Term Term deriving (Eq, Ord)
 
@@ -61,11 +43,21 @@ instance (Termable a) => Termable [a] where
     toTerm [] = TNil
     toTerm (x:xs) = TCons (toTerm x) (toTerm xs)
 
+instance (Termable a, Termable b) => Termable (a, b) where
+    toTerm (x, y) = TCons (toTerm x) $ TCons (toTerm y) TNil
+
+
 instance Termable Term where
     toTerm a = a
 
-type Constrains = [(Term, Term)] -- disequality constrains
-data Substitution = Substitution (Map.Map LVar Term) Int Constrains | Zonk deriving (Show, Eq)
+type Bindings = Map.Map LVar Term
+type Constraint = Map.Map LVar Term -> Bool
+type Constraints = [Constraint]
+data Substitution = Substitution { bindings :: Bindings
+                                 , counter :: Int
+                                 , constraints :: Constraints
+                                 }
+                  | Zonk
 
 newtype MLogic a = MLogic {runMLogic :: Substitution -> [(Substitution, a)]}
 type Predicate = MLogic ()
@@ -95,32 +87,27 @@ unify a b s = case (a, b) of
     (a, v@(TVar _)) -> unify v a s
     _ -> Zonk
 
-
-verifyConstrain :: Substitution -> (Term, Term) -> Bool
-verifyConstrain s (TVar a, TVar b) = deepLookup (LVar a) s /= deepLookup (LVar b) s
-verifyConstrain s (TVar a, b) = deepLookup (LVar a) s /= b
-verifyConstrain s (b, TVar a) = deepLookup (LVar a) s /= b
-verifyConstrain s (a,b) = a /= b
-
-verifyConstrains :: Substitution -> Bool
-verifyConstrains s@(Substitution _ _ constrains) = all (verifyConstrain s) constrains
+verifyConstraints :: Substitution -> Bool
+verifyConstraints s@(Substitution bindings _ constraints) =
+  and $ map ($ bindings) constraints
 
 eq :: (Termable a, Termable b) => a -> b -> Predicate
 eq a b = MLogic $ \s -> case unify (toTerm a) (toTerm b) s of
-    s@(Substitution _ _ _) | verifyConstrains s -> [(s, ())]
+    s@(Substitution _ _ _) | verifyConstraints s -> [(s, ())]
     _ -> []
 
-notEq :: (Termable a, Termable b) => a -> b -> Predicate
-notEq a b = MLogic $ \s -> case unify (toTerm a) (toTerm b) s of
-    Zonk -> [(s, ())]
-    s' | s' == s -> []
-    _ -> let (Substitution m c d) = s in [(Substitution m c ((toTerm a, toTerm b):d),  ())]
 
 (===) :: (Termable a, Termable b) => a -> b -> Predicate
 (===) = eq
 
-(=/=) :: (Termable a, Termable b) => a -> b -> Predicate
-(=/=) = notEq
+-- isInt :: (Termable a) => a -> Predicate
+-- isInt x = MLogic $ \s -> case toTerm x of
+--   TInt _ -> [(s, ())]
+--   TVar a -> case deepLookup (LVar a) s of
+--               TInt i -> [(s, ())]
+--               TVar _ -> [(s, ())]
+--               _      -> []
+--   _      -> []
 
 success :: Predicate
 success = return ()
@@ -177,15 +164,19 @@ appendo l s out =
         conso a r out
         appendo d s r)
 
-deepLookup :: LVar -> Substitution -> Term
-deepLookup var@(LVar v) sub = case sLookup var sub of
+deepLookup :: LVar -> Bindings -> Term
+deepLookup var@(LVar v) b = case Map.lookup var b of
     Nothing -> TVar v
-    (Just (TVar v)) -> deepLookup (LVar v) sub
+    (Just (TVar v)) -> deepLookup (LVar v) b
     (Just x) -> x
+
+sortaDeepLookup :: Term -> Bindings -> Term
+sortaDeepLookup (TVar v) b = deepLookup (LVar v) b
+sortaDeepLookup term _ = term
 
 reify :: Term -> Substitution -> Term
 reify (TCons a b) sub = TCons (reify a sub) (reify b sub)
-reify t@(TVar v) sub = case deepLookup (LVar v) sub of
+reify t@(TVar v) sub = case deepLookup (LVar v) (bindings sub) of
     x | x == t -> t
     x -> reify x sub
 reify x sub = x
@@ -193,5 +184,12 @@ reify x sub = x
 run :: (Termable a) => MLogic a -> [Term]
 run p = do
     (sub,res) <- runMLogic p emptySubstitution
+    guard $ verifyConstraints sub
     return $ reify (toTerm res) sub
 
+-- blah = run $ do
+--   x <- fresh
+--   y <- fresh
+--   membero x ([1, 2, 3] :: [Int])
+--   y === (2 :: Int)
+--   return x
