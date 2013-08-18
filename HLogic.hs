@@ -127,19 +127,12 @@ instance MonadPlus MLogic where
     mzero = MLogic $ \s -> []
     mplus a b = MLogic $ \s -> runMLogic a s ++ runMLogic b s
 
--- conda :: [Predicate] -> Predicate
--- conda [] = fail
--- conda (x:xs) = MLogic $ \s -> case runMLogic x s of
---   [] -> runMLogic (conda xs) s
---   subs -> subs
-
 conda :: [[Predicate]] -> Predicate
 conda [] = fail
-conda (xs:ys) = MLogic $ \s -> case map (`runMLogic` s) xs of
+conda ([]:ys) = conda ys
+conda ((x:xs):ys) = MLogic $ \s -> case runMLogic x s of
   []   -> runMLogic (conda ys) s
-  []:_ -> runMLogic (conda ys) s
-  subs | any null subs -> []
-       | otherwise     -> concat subs
+  _    -> runMLogic (sequence_ $ x:xs) s
 
 fresh :: MLogic Term
 fresh = MLogic $ \(Substitution m counter d) -> [(Substitution m (counter + 1) d, TVar counter)]
