@@ -1,12 +1,12 @@
 {-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, OverlappingInstances #-}
-
 module HLogic where
 
 import Prelude hiding (fail)
 import qualified Data.Map as Map
 import Control.Monad hiding (fail)
 import Data.List
-
+import Debug.Trace
+import Data.Maybe
 
 data LVar = LVar Int deriving (Show, Eq, Ord)
 
@@ -39,6 +39,9 @@ instance Termable LVar where
 instance Termable String where
     toTerm = TString
 
+instance Termable Char where
+    toTerm c = TString [c]
+
 instance (Termable a) => Termable [a] where
     toTerm [] = TNil
     toTerm (x:xs) = TCons (toTerm x) (toTerm xs)
@@ -51,13 +54,13 @@ instance Termable Term where
     toTerm a = a
 
 type Bindings = Map.Map LVar Term
-type Constraint = Map.Map LVar Term -> Bool
+type Constraint = Substitution -> Substitution
 type Constraints = [Constraint]
 data Substitution = Substitution { bindings :: Bindings
                                  , counter :: Int
                                  , constraints :: Constraints
                                  }
-                  | Zonk
+                  | Failure
 
 newtype MLogic a = MLogic {runMLogic :: Substitution -> [(Substitution, a)]}
 type Predicate = MLogic ()
@@ -74,7 +77,7 @@ sInsert k v (Substitution s c d) = Substitution (Map.insert k v s) c d
 --  unify :: a -> b -> Substitution -> Substitution
 
 unify :: Term -> Term -> Substitution -> Substitution
-unify _ _ Zonk = Zonk
+unify _ _ Failure = Failure
 unify a b s = case (a, b) of
     (TInt a, TInt b) | a == b -> s
     (TString a, TString b) | a == b -> s
@@ -85,29 +88,25 @@ unify a b s = case (a, b) of
         Nothing -> sInsert (LVar v) a s
         (Just val) -> unify val a s
     (a, v@(TVar _)) -> unify v a s
-    _ -> Zonk
+    _ -> Failure
 
-verifyConstraints :: Substitution -> Bool
-verifyConstraints s@(Substitution bindings _ constraints) =
-  and $ map ($ bindings) constraints
+applyConstraints :: Substitution -> [(Substitution, ())]
+applyConstraints s@Substitution{constraints=[]} = [(s, ())]
+applyConstraints s@Substitution{constraints=constraints} =
+  let ss = filter (not.isFailure) $ map ($ s) constraints
+      isFailure Failure = True
+      isFailure _    = False
+      toPair s = (s, ())
+  in map toPair ss
 
 eq :: (Termable a, Termable b) => a -> b -> Predicate
 eq a b = MLogic $ \s -> case unify (toTerm a) (toTerm b) s of
-    s@(Substitution _ _ _) | verifyConstraints s -> [(s, ())]
+    s'@Substitution{} -> applyConstraints s'
     _ -> []
 
 
 (===) :: (Termable a, Termable b) => a -> b -> Predicate
 (===) = eq
-
--- isInt :: (Termable a) => a -> Predicate
--- isInt x = MLogic $ \s -> case toTerm x of
---   TInt _ -> [(s, ())]
---   TVar a -> case deepLookup (LVar a) s of
---               TInt i -> [(s, ())]
---               TVar _ -> [(s, ())]
---               _      -> []
---   _      -> []
 
 success :: Predicate
 success = return ()
@@ -127,6 +126,20 @@ instance Monad MLogic where
 instance MonadPlus MLogic where
     mzero = MLogic $ \s -> []
     mplus a b = MLogic $ \s -> runMLogic a s ++ runMLogic b s
+
+-- conda :: [Predicate] -> Predicate
+-- conda [] = fail
+-- conda (x:xs) = MLogic $ \s -> case runMLogic x s of
+--   [] -> runMLogic (conda xs) s
+--   subs -> subs
+
+conda :: [[Predicate]] -> Predicate
+conda [] = fail
+conda (xs:ys) = MLogic $ \s -> case map (`runMLogic` s) xs of
+  []   -> runMLogic (conda ys) s
+  []:_ -> runMLogic (conda ys) s
+  subs | any null subs -> []
+       | otherwise     -> concat subs
 
 fresh :: MLogic Term
 fresh = MLogic $ \(Substitution m counter d) -> [(Substitution m (counter + 1) d, TVar counter)]
@@ -184,12 +197,4 @@ reify x sub = x
 run :: (Termable a) => MLogic a -> [Term]
 run p = do
     (sub,res) <- runMLogic p emptySubstitution
-    guard $ verifyConstraints sub
     return $ reify (toTerm res) sub
-
--- blah = run $ do
---   x <- fresh
---   y <- fresh
---   membero x ([1, 2, 3] :: [Int])
---   y === (2 :: Int)
---   return x
